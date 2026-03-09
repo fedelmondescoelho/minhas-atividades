@@ -7,20 +7,31 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const PROJECTS = ["Design", "Desenvolvimento", "Reuniões", "Documentação", "Marketing", "Suporte", "Outros"];
 const STATUSES = ["A fazer", "Em andamento", "Concluído"];
+const AUTHORS = ["Eu", "Dora", "Mauricio"];
 const STATUS_COLORS = {
   "A fazer": { bg: "#F1F5F9", text: "#64748B", dot: "#94A3B8" },
   "Em andamento": { bg: "#EFF6FF", text: "#2563EB", dot: "#3B82F6" },
   "Concluído": { bg: "#F0FDF4", text: "#16A34A", dot: "#22C55E" },
 };
+const AUTHOR_COLORS = { "Eu": "#3B82F6", "Dora": "#8B5CF6", "Mauricio": "#1E293B" };
 
 const today = () => new Date().toISOString().split("T")[0];
-const fmtDate = (d) => new Date(d + "T12:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" });
+const fmtDate = (d) => d ? new Date(d + "T12:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 const weekRange = () => {
   const now = new Date();
   const day = now.getDay();
   const mon = new Date(now); mon.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
   const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
   return [mon.toISOString().split("T")[0], sun.toISOString().split("T")[0]];
+};
+const isOverdue = (dueDate, status) => {
+  if (!dueDate || status === "Concluído") return false;
+  return dueDate < today();
+};
+const isDueSoon = (dueDate, status) => {
+  if (!dueDate || status === "Concluído") return false;
+  const diff = (new Date(dueDate + "T12:00:00") - new Date()) / (1000 * 60 * 60 * 24);
+  return diff >= 0 && diff <= 2;
 };
 
 export default function App() {
@@ -30,11 +41,12 @@ export default function App() {
   const [filterProject, setFilterProject] = useState("Todos");
   const [filterStatus, setFilterStatus] = useState("Todos");
   const [modal, setModal] = useState(null);
-  const [form, setForm] = useState({ title: "", project: PROJECTS[0], status: STATUSES[0], date: today(), note: "" });
+  const [form, setForm] = useState({ title: "", project: PROJECTS[0], status: STATUSES[0], date: today(), due_date: "", note: "" });
   const [commentText, setCommentText] = useState("");
-  const [commentAuthor, setCommentAuthor] = useState("Chefe");
+  const [commentAuthor, setCommentAuthor] = useState("Eu");
   const [toast, setToast] = useState(null);
   const [diaryDate, setDiaryDate] = useState(today());
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2500); };
 
@@ -65,13 +77,15 @@ export default function App() {
     if (!form.title.trim()) return;
     if (modal.task) {
       const { error } = await supabase.from("tasks").update({
-        title: form.title, project: form.project, status: form.status, date: form.date, note: form.note
+        title: form.title, project: form.project, status: form.status,
+        date: form.date, due_date: form.due_date || null, note: form.note
       }).eq("id", modal.task.id);
       if (error) { showToast("Erro ao atualizar.", "err"); return; }
       showToast("Tarefa atualizada!");
     } else {
       const { error } = await supabase.from("tasks").insert({
-        title: form.title, project: form.project, status: form.status, date: form.date, note: form.note, comments: []
+        title: form.title, project: form.project, status: form.status,
+        date: form.date, due_date: form.due_date || null, note: form.note, comments: []
       });
       if (error) { showToast("Erro ao salvar.", "err"); return; }
       showToast("Tarefa adicionada!");
@@ -84,6 +98,7 @@ export default function App() {
     const { error } = await supabase.from("tasks").delete().eq("id", id);
     if (error) { showToast("Erro ao excluir.", "err"); return; }
     showToast("Tarefa removida.");
+    setConfirmDelete(null);
     setModal(null);
     fetchTasks();
   };
@@ -99,8 +114,8 @@ export default function App() {
     fetchTasks();
   };
 
-  const openAdd = () => { setForm({ title: "", project: PROJECTS[0], status: STATUSES[0], date: today(), note: "" }); setModal({ type: "form" }); };
-  const openEdit = (task) => { setForm({ title: task.title, project: task.project, status: task.status, date: task.date, note: task.note }); setModal({ type: "form", task }); };
+  const openAdd = () => { setForm({ title: "", project: PROJECTS[0], status: STATUSES[0], date: today(), due_date: "", note: "" }); setModal({ type: "form" }); };
+  const openEdit = (task) => { setForm({ title: task.title, project: task.project, status: task.status, date: task.date, due_date: task.due_date || "", note: task.note }); setModal({ type: "form", task }); };
   const openDetail = (task) => { setCommentText(""); setModal({ type: "detail", task }); };
   const currentTask = modal?.task ? tasks.find(t => t.id === modal.task.id) : null;
   const byStatus = (s) => filtered.filter(t => t.status === s);
@@ -111,6 +126,18 @@ export default function App() {
     doing: weekTasks.filter(t => t.status === "Em andamento").length,
     todo: weekTasks.filter(t => t.status === "A fazer").length,
     byProject: PROJECTS.map(p => ({ p, count: weekTasks.filter(t => t.project === p).length })).filter(x => x.count > 0),
+  };
+
+  const DueBadge = ({ task }) => {
+    if (!task.due_date || task.status === "Concluído") return null;
+    const overdue = isOverdue(task.due_date, task.status);
+    const soon = isDueSoon(task.due_date, task.status);
+    if (!overdue && !soon) return <span style={{ fontSize: 11, color: "#94A3B8" }}>📅 {fmtDate(task.due_date)}</span>;
+    return (
+      <span style={{ fontSize: 11, fontWeight: 600, color: overdue ? "#EF4444" : "#F59E0B", background: overdue ? "#FEF2F2" : "#FFFBEB", padding: "2px 7px", borderRadius: 10 }}>
+        {overdue ? "⚠ Vencida" : "⏰ Vence em breve"} · {fmtDate(task.due_date)}
+      </span>
+    );
   };
 
   return (
@@ -125,6 +152,8 @@ export default function App() {
         .btn-primary:hover { background: #334155; }
         .btn-ghost { background: transparent; border: 1px solid #E2E8F0; border-radius: 8px; padding: 8px 14px; font-size: 13px; color: #475569; transition: all .15s; }
         .btn-ghost:hover { background: #F1F5F9; border-color: #CBD5E1; }
+        .btn-danger { background: #EF4444; color: #fff; border: none; border-radius: 8px; padding: 9px 18px; font-size: 14px; font-weight: 500; transition: background .15s; }
+        .btn-danger:hover { background: #DC2626; }
         .tag { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
         .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
         .modal { background: #fff; border-radius: 16px; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.15); }
@@ -133,6 +162,8 @@ export default function App() {
         .nav-btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500; border: none; transition: all .15s; }
         .task-card { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; padding: 14px; margin-bottom: 10px; cursor: pointer; transition: box-shadow .15s, border-color .15s; }
         .task-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.07); border-color: #CBD5E1; }
+        .task-card.overdue { border-left: 3px solid #EF4444; }
+        .task-card.soon { border-left: 3px solid #F59E0B; }
         .progress-bar { height: 6px; border-radius: 3px; background: #E2E8F0; overflow: hidden; }
         .progress-fill { height: 100%; border-radius: 3px; background: #22C55E; transition: width .4s; }
         ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #F1F5F9; } ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
@@ -142,6 +173,7 @@ export default function App() {
         @keyframes spin { to { transform: rotate(360deg); } }
       `}</style>
 
+      {/* Header */}
       <div style={{ background: "#fff", borderBottom: "1px solid #E2E8F0", padding: "0 24px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", height: 60 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -160,6 +192,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* Filters */}
       <div style={{ background: "#fff", borderBottom: "1px solid #F1F5F9", padding: "0 24px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", gap: 10, padding: "10px 0", flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 500, marginRight: 4 }}>FILTRAR:</span>
@@ -181,6 +214,7 @@ export default function App() {
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: 200 }}><div className="spinner"></div></div>
         ) : (
           <>
+            {/* BOARD */}
             {view === "board" && (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
                 {STATUSES.map(status => {
@@ -195,15 +229,19 @@ export default function App() {
                       </div>
                       {col.length === 0 && <div style={{ border: "1.5px dashed #E2E8F0", borderRadius: 10, padding: "24px 16px", textAlign: "center", color: "#CBD5E1", fontSize: 13 }}>Nenhuma tarefa</div>}
                       {col.map(task => (
-                        <div key={task.id} className="task-card" onClick={() => openDetail(task)}>
+                        <div key={task.id} className={`task-card${isOverdue(task.due_date, task.status) ? " overdue" : isDueSoon(task.due_date, task.status) ? " soon" : ""}`} onClick={() => openDetail(task)}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
                             <span style={{ fontWeight: 600, fontSize: 14, color: "#1E293B", lineHeight: 1.4 }}>{task.title}</span>
-                            <button style={{ background: "none", border: "none", color: "#CBD5E1", fontSize: 16, lineHeight: 1, marginLeft: 8, padding: 2 }} onClick={e => { e.stopPropagation(); openEdit(task); }}>✎</button>
+                            <div style={{ display: "flex", gap: 4, flexShrink: 0, marginLeft: 8 }}>
+                              <button style={{ background: "none", border: "none", color: "#CBD5E1", fontSize: 15, lineHeight: 1, padding: 2 }} onClick={e => { e.stopPropagation(); openEdit(task); }}>✎</button>
+                              <button style={{ background: "none", border: "none", color: "#FCA5A5", fontSize: 15, lineHeight: 1, padding: 2 }} onClick={e => { e.stopPropagation(); setConfirmDelete(task); }}>🗑</button>
+                            </div>
                           </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: task.due_date ? 6 : 0 }}>
                             <span className="tag" style={{ background: "#F1F5F9", color: "#64748B" }}>{task.project}</span>
                             <span style={{ fontSize: 11, color: "#94A3B8", marginLeft: "auto" }}>{fmtDate(task.date)}</span>
                           </div>
+                          <DueBadge task={task} />
                           {task.note && <p style={{ marginTop: 8, fontSize: 12, color: "#94A3B8", lineHeight: 1.5, borderTop: "1px solid #F8FAFC", paddingTop: 8 }}>{task.note}</p>}
                           {task.comments?.length > 0 && <div style={{ marginTop: 8 }}><span style={{ fontSize: 11, color: "#3B82F6" }}>💬 {task.comments.length} comentário{task.comments.length > 1 ? "s" : ""}</span></div>}
                         </div>
@@ -214,6 +252,7 @@ export default function App() {
               </div>
             )}
 
+            {/* DIARY */}
             {view === "diary" && (
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24 }}>
@@ -239,22 +278,12 @@ export default function App() {
                           <span className="tag" style={{ background: "#F1F5F9", color: "#64748B" }}>{task.project}</span>
                           <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                             <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => openEdit(task)}>Editar</button>
+                            <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 10px", color: "#EF4444", borderColor: "#FECACA" }} onClick={() => setConfirmDelete(task)}>Excluir</button>
                             <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => openDetail(task)}>Ver</button>
                           </div>
                         </div>
-                        {task.note && <p style={{ fontSize: 13, color: "#64748B", lineHeight: 1.6 }}>{task.note}</p>}
-                        {task.comments?.length > 0 && (
-                          <div style={{ marginTop: 10, borderTop: "1px solid #F1F5F9", paddingTop: 10 }}>
-                            {task.comments.map((c, i) => (
-                              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-                                <div style={{ width: 24, height: 24, borderRadius: "50%", background: "#1E293B", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                                  <span style={{ color: "#fff", fontSize: 11, fontWeight: 600 }}>{c.author[0]}</span>
-                                </div>
-                                <div><span style={{ fontSize: 12, fontWeight: 600, color: "#475569" }}>{c.author} </span><span style={{ fontSize: 12, color: "#64748B" }}>{c.text}</span></div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                        <DueBadge task={task} />
+                        {task.note && <p style={{ fontSize: 13, color: "#64748B", lineHeight: 1.6, marginTop: 6 }}>{task.note}</p>}
                       </div>
                     </div>
                   );
@@ -262,6 +291,7 @@ export default function App() {
               </div>
             )}
 
+            {/* SUMMARY */}
             {view === "summary" && (
               <div>
                 <div style={{ marginBottom: 24 }}>
@@ -302,6 +332,7 @@ export default function App() {
         )}
       </div>
 
+      {/* MODAL FORM */}
       {modal?.type === "form" && (
         <div className="overlay" onClick={() => setModal(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -322,9 +353,15 @@ export default function App() {
                     <select className="input" value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select>
                   </div>
                 </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: "#64748B", display: "block", marginBottom: 5 }}>DATA</label>
-                  <input type="date" className="input" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600, color: "#64748B", display: "block", marginBottom: 5 }}>DATA DE INÍCIO</label>
+                    <input type="date" className="input" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600, color: "#64748B", display: "block", marginBottom: 5 }}>DATA DE VENCIMENTO</label>
+                    <input type="date" className="input" value={form.due_date} onChange={e => setForm(f => ({ ...f, due_date: e.target.value }))} />
+                  </div>
                 </div>
                 <div>
                   <label style={{ fontSize: 12, fontWeight: 600, color: "#64748B", display: "block", marginBottom: 5 }}>OBSERVAÇÕES</label>
@@ -333,7 +370,6 @@ export default function App() {
               </div>
             </div>
             <div style={{ padding: "20px 24px", display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              {modal.task && <button className="btn-ghost" style={{ color: "#EF4444", borderColor: "#FECACA" }} onClick={() => deleteTask(modal.task.id)}>Excluir</button>}
               <button className="btn-ghost" onClick={() => setModal(null)}>Cancelar</button>
               <button className="btn-primary" onClick={saveTask}>Salvar</button>
             </div>
@@ -341,6 +377,7 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL DETAIL */}
       {modal?.type === "detail" && currentTask && (
         <div className="overlay" onClick={() => setModal(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -349,18 +386,21 @@ export default function App() {
                 <div style={{ fontSize: 17, fontWeight: 700, flex: 1, paddingRight: 12 }}>{currentTask.title}</div>
                 <button style={{ background: "none", border: "none", fontSize: 20, color: "#94A3B8", lineHeight: 1 }} onClick={() => setModal(null)}>✕</button>
               </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
                 <span className="tag" style={{ background: STATUS_COLORS[currentTask.status].bg, color: STATUS_COLORS[currentTask.status].text }}>{currentTask.status}</span>
                 <span className="tag" style={{ background: "#F1F5F9", color: "#64748B" }}>{currentTask.project}</span>
-                <span style={{ fontSize: 12, color: "#94A3B8", alignSelf: "center" }}>{fmtDate(currentTask.date)}</span>
+                <span style={{ fontSize: 12, color: "#94A3B8", alignSelf: "center" }}>Início: {fmtDate(currentTask.date)}</span>
               </div>
+              {currentTask.due_date && (
+                <div style={{ marginBottom: 14 }}><DueBadge task={currentTask} /></div>
+              )}
               {currentTask.note && <p style={{ fontSize: 14, color: "#64748B", lineHeight: 1.7, marginBottom: 20, padding: "12px 14px", background: "#F8FAFC", borderRadius: 8 }}>{currentTask.note}</p>}
               <div style={{ borderTop: "1px solid #F1F5F9", paddingTop: 18 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "#64748B", marginBottom: 12 }}>COMENTÁRIOS ({currentTask.comments?.length || 0})</div>
                 {(!currentTask.comments || currentTask.comments.length === 0) && <div style={{ fontSize: 13, color: "#CBD5E1", marginBottom: 16 }}>Nenhum comentário ainda.</div>}
                 {currentTask.comments?.map((c, i) => (
                   <div key={i} style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-                    <div style={{ width: 30, height: 30, borderRadius: "50%", background: c.author === "Chefe" ? "#1E293B" : "#3B82F6", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <div style={{ width: 30, height: 30, borderRadius: "50%", background: AUTHOR_COLORS[c.author] || "#1E293B", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                       <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>{c.author[0]}</span>
                     </div>
                     <div style={{ background: "#F8FAFC", borderRadius: 8, padding: "10px 14px", flex: 1 }}>
@@ -372,7 +412,7 @@ export default function App() {
                 <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginTop: 10 }}>
                   <div style={{ flex: 1 }}>
                     <select className="input" style={{ marginBottom: 6, fontSize: 12 }} value={commentAuthor} onChange={e => setCommentAuthor(e.target.value)}>
-                      <option>Chefe</option><option>Eu</option>
+                      {AUTHORS.map(a => <option key={a}>{a}</option>)}
                     </select>
                     <textarea className="input" rows={2} placeholder="Adicionar comentário..." value={commentText} onChange={e => setCommentText(e.target.value)} style={{ resize: "none" }} />
                   </div>
@@ -380,8 +420,28 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div style={{ padding: "14px 24px", display: "flex", gap: 8, borderTop: "1px solid #F1F5F9", justifyContent: "flex-end" }}>
-              <button className="btn-ghost" onClick={() => { setModal({ type: "form", task: currentTask }); setForm({ title: currentTask.title, project: currentTask.project, status: currentTask.status, date: currentTask.date, note: currentTask.note }); }}>Editar tarefa</button>
+            <div style={{ padding: "14px 24px", display: "flex", gap: 8, borderTop: "1px solid #F1F5F9", justifyContent: "space-between" }}>
+              <button className="btn-ghost" style={{ color: "#EF4444", borderColor: "#FECACA" }} onClick={() => { setModal(null); setConfirmDelete(currentTask); }}>🗑 Excluir</button>
+              <button className="btn-ghost" onClick={() => { setModal({ type: "form", task: currentTask }); setForm({ title: currentTask.title, project: currentTask.project, status: currentTask.status, date: currentTask.date, due_date: currentTask.due_date || "", note: currentTask.note }); }}>Editar tarefa</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRM DELETE */}
+      {confirmDelete && (
+        <div className="overlay" onClick={() => setConfirmDelete(null)}>
+          <div className="modal" style={{ maxWidth: 380 }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: "28px 24px" }}>
+              <div style={{ fontSize: 32, marginBottom: 12, textAlign: "center" }}>🗑</div>
+              <div style={{ fontSize: 16, fontWeight: 700, textAlign: "center", marginBottom: 8 }}>Excluir tarefa?</div>
+              <div style={{ fontSize: 14, color: "#64748B", textAlign: "center", marginBottom: 24 }}>
+                "<strong>{confirmDelete.title}</strong>" será excluída permanentemente.
+              </div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+                <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>Cancelar</button>
+                <button className="btn-danger" onClick={() => deleteTask(confirmDelete.id)}>Excluir</button>
+              </div>
             </div>
           </div>
         </div>
@@ -390,4 +450,6 @@ export default function App() {
       {toast && <div className="toast" style={{ background: toast.type === "err" ? "#EF4444" : "#1E293B", color: "#fff" }}>{toast.msg}</div>}
     </div>
   );
+}
+
 }
